@@ -1,0 +1,10 @@
+{
+    "total_moves": 2,
+    "move_duration": 0.5,
+    "sleep_between_clicks": 1.0,
+    "long_sleep_duration": 2.0,
+    "left_click_coords": [1450, 80],
+    "right_click_coords": [1450, 950],
+    "jitter_range": 3,
+    "duration_variation": 0.5
+}

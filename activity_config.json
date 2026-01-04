@@ -1,0 +1,11 @@
+{
+    "activity_interval": 120,
+    "total_duration": 18000,
+    "method": "mouse",
+    "keyboard_key": "scrolllock",
+    "mouse_move_distance": 10,
+    "schedule_enabled": false,
+    "work_hours_start": "09:00",
+    "work_hours_end": "17:00",
+    "work_days": [1, 2, 3, 4, 5]
+}
