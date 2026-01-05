@@ -8,6 +8,7 @@ import signal
 import logging
 import msvcrt
 import ctypes
+import threading
 from typing import Optional, Tuple
 from datetime import datetime, timedelta
 
@@ -16,6 +17,13 @@ try:
     SOUND_AVAILABLE = True
 except ImportError:
     SOUND_AVAILABLE = False
+
+try:
+    from pystray import Icon, Menu, MenuItem
+    from PIL import Image, ImageDraw
+    TRAY_AVAILABLE = True
+except ImportError:
+    TRAY_AVAILABLE = False
 
 try:
     import pyautogui as pag
@@ -56,13 +64,18 @@ PAUSED = False  # Global pause state
 DETECT_INACTIVITY = False # Global inactivity detection flag
 AUTO_PAUSED = False # Global auto-paused state
 RANDOM_PATTERN = False  # Global random pattern flag
+TRAY_ENABLED = False  # Global system tray flag
+tray_icon = None  # Reference to the tray icon object
 QUIET = False  # Quiet/headless mode flag
 DRY_RUN = False  # Dry-run mode flag (simulate activity)
+CONFIG_RELOAD_REQUESTED = False  # Flag for configuration hot-reload request
+current_config_file = "activity_config.json"  # Track current config file path
 AUTO_RESTART = False  # Auto-restart on schedule flag
 PROFILE = "default"  # Current profile name
-VERSION = "2.3.0"
+VERSION = "2.4.0"
 LOG_FILE = "activity_keeper.log"
 logger = None  # Will be initialized in main()
+_RELOADED_CONFIG: Optional[dict] = None  # Last successfully reloaded config snapshot
 
 # Logger is now initialized in main() via setup_logging()
 
@@ -180,6 +193,120 @@ def load_config(config_file: str = 'activity_config.json') -> dict:
     
     verbose_log(f"Loaded configuration from {config_file}")
     return config
+
+
+def reload_config() -> Tuple[bool, str]:
+    """Reload configuration from current_config_file safely (never exits)."""
+    global _RELOADED_CONFIG
+
+    verbose_log(f"Attempting config reload from: {current_config_file}")
+    console_log(f"Reloading from: {current_config_file}")
+
+    try:
+        with open(current_config_file, 'r') as f:
+            new_config = json.load(f)
+    except FileNotFoundError:
+        _RELOADED_CONFIG = None
+        msg = "Could not read config file (file not found)"
+        verbose_log(msg)
+        return False, msg
+    except json.JSONDecodeError as e:
+        _RELOADED_CONFIG = None
+        msg = f"Invalid JSON in config file: {e}"
+        verbose_log(msg)
+        return False, msg
+    except Exception as e:
+        _RELOADED_CONFIG = None
+        msg = f"Could not read config file: {e}"
+        verbose_log(msg)
+        return False, msg
+
+    try:
+        is_valid, error_msg = validate_config(new_config)
+    except Exception as e:
+        _RELOADED_CONFIG = None
+        msg = f"Config validation error: {e}"
+        verbose_log(msg)
+        return False, msg
+
+    if not is_valid:
+        _RELOADED_CONFIG = None
+        verbose_log(f"Config reload validation failed: {error_msg}")
+        return False, error_msg
+
+    _RELOADED_CONFIG = new_config
+    verbose_log("Config reloaded successfully")
+    return True, "Config reloaded successfully"
+
+
+def get_builtin_presets() -> dict:
+    """Returns a dictionary of built-in preset configurations."""
+    return {
+        "stealth": {
+            "activity_interval": 180,
+            "pattern_randomization_enabled": True,
+            "randomization_mouse_probability": 0.6,
+            "inactivity_detection_enabled": True,
+            "inactivity_threshold_seconds": 90,
+            "sound_enabled": False,
+            "method": "mouse"
+        },
+        "aggressive": {
+            "activity_interval": 60,
+            "pattern_randomization_enabled": False,
+            "inactivity_detection_enabled": False,
+            "sound_enabled": False,
+            "method": "mouse"
+        },
+        "testing": {
+            "activity_interval": 10,
+            "total_duration": 60,
+            "pattern_randomization_enabled": True,
+            "inactivity_detection_enabled": False,
+            "sound_enabled": True,
+            "sound_on_heartbeat": True,
+            "method": "mouse"
+        },
+        "standard": {
+            "activity_interval": 120,
+            "pattern_randomization_enabled": False,
+            "inactivity_detection_enabled": False,
+            "sound_enabled": False,
+            "method": "mouse"
+        }
+    }
+
+
+def get_preset_descriptions() -> dict:
+    """Returns a dictionary of preset names and their descriptions."""
+    return {
+        "stealth": "Maximum stealth with randomization and inactivity detection",
+        "aggressive": "Frequent activity with minimal delays",
+        "testing": "Quick testing with short intervals and sound feedback",
+        "standard": "Default balanced configuration"
+    }
+
+
+def load_preset(preset_name: str) -> Optional[dict]:
+    """Load a configuration preset by name."""
+    # Check built-in
+    builtin = get_builtin_presets()
+    if preset_name in builtin:
+        verbose_log(f"Loading built-in preset: {preset_name}")
+        return builtin[preset_name]
+
+    # Check for custom preset file
+    preset_file = f"{preset_name}_preset.json"
+    if os.path.exists(preset_file):
+        verbose_log(f"Loading custom preset from file: {preset_file}")
+        try:
+            with open(preset_file, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            verbose_log(f"Error loading custom preset file: {e}")
+            return None
+
+    return None
 
 
 def validate_config(config: dict) -> Tuple[bool, str]:
@@ -431,7 +558,7 @@ def draw_dashboard(status: str, interval: int, total_jiggles: int, start_time: f
     if show_warning:
         print(f"|{f'  WARNING: Schedule ending soon!'.ljust(width)}|")
     print("+------------------------------------------------+")
-    print(f"|{'Press ESC/Q=STOP | P=PAUSE | R=RESUME'.center(width)}|")
+    print(f"|{'Press ESC/Q=STOP | P=PAUSE | R=RESUME | C=RELOAD'.center(width)}|")
     print("+------------------------------------------------+")
     print("\nRecent Activity:")
     if activity_history:
@@ -443,7 +570,7 @@ def draw_dashboard(status: str, interval: int, total_jiggles: int, start_time: f
 
 def wait_for_next_activity(next_activity_time: float, end_time: float, config: dict = None) -> bool:
     """Wait until next activity time. Returns False if user wants to exit."""
-    global PAUSED, AUTO_PAUSED
+    global PAUSED, AUTO_PAUSED, CONFIG_RELOAD_REQUESTED
     if PAUSED and not AUTO_PAUSED:
         return True
         
@@ -462,6 +589,8 @@ def wait_for_next_activity(next_activity_time: float, end_time: float, config: d
                 if not PAUSED:
                     PAUSED = True
                     AUTO_PAUSED = True
+                    if TRAY_ENABLED:
+                        update_tray_icon('paused')
                     console_log("User activity detected, automatically pausing...")
                     verbose_log(f"Auto-pausing: idle_time={idle_time:.2f}s < threshold={inactivity_threshold}s")
                     return True # Return to main loop to handle pause state
@@ -471,6 +600,8 @@ def wait_for_next_activity(next_activity_time: float, end_time: float, config: d
                 if idle_time >= inactivity_threshold:
                     PAUSED = False
                     AUTO_PAUSED = False
+                    if TRAY_ENABLED:
+                        update_tray_icon('running')
                     console_log("User inactivity detected, automatically resuming...")
                     verbose_log(f"Auto-resuming: idle_time={idle_time:.2f}s >= threshold={inactivity_threshold}s")
 
@@ -480,14 +611,23 @@ def wait_for_next_activity(next_activity_time: float, end_time: float, config: d
             if key in EXIT_KEYS:
                 verbose_log(f"Exit key detected: {key}")
                 return False
+            if key in [67, 99]:  # C or c
+                CONFIG_RELOAD_REQUESTED = True
+                console_log("Config reload requested...")
+                verbose_log("Config reload requested via keypress")
+                return True
             if key in [80, 112]:  # P or p
                 PAUSED = True
                 AUTO_PAUSED = False # Manual pause overrides auto-pause
+                if TRAY_ENABLED:
+                    update_tray_icon('paused')
                 verbose_log("Program PAUSED")
                 return True
             if key in [82, 114]:  # R or r
                 PAUSED = False
                 AUTO_PAUSED = False
+                if TRAY_ENABLED:
+                    update_tray_icon('running')
                 verbose_log("Program RESUMED")
 
         # Calculate remaining time
@@ -528,7 +668,7 @@ def keep_active(activity_interval: int, total_duration: int, method: str, keyboa
 
     Returns (should_wait_for_schedule, session_jiggles).
     """
-    global PAUSED, AUTO_PAUSED
+    global PAUSED, AUTO_PAUSED, CONFIG_RELOAD_REQUESTED
     start_time = time.time()
     end_time = start_time + total_duration
     total_jiggles = 0
@@ -539,6 +679,64 @@ def keep_active(activity_interval: int, total_duration: int, method: str, keyboa
     # Extract randomization settings
     pattern_randomization_enabled = config.get('pattern_randomization_enabled', False)
     mouse_probability = config.get('randomization_mouse_probability', 0.7)
+
+    def process_config_reload() -> None:
+        nonlocal activity_interval, pattern_randomization_enabled, mouse_probability
+        global CONFIG_RELOAD_REQUESTED
+
+        if not CONFIG_RELOAD_REQUESTED:
+            return
+
+        success, message = reload_config()
+        if success and _RELOADED_CONFIG is not None:
+            old_config = dict(config)
+            config.clear()
+            config.update(_RELOADED_CONFIG)
+
+            old_interval = activity_interval
+            try:
+                activity_interval = int(config.get('activity_interval', activity_interval))
+            except (TypeError, ValueError):
+                activity_interval = old_interval
+            config['activity_interval'] = activity_interval
+
+            pattern_randomization_enabled = config.get('pattern_randomization_enabled', pattern_randomization_enabled)
+            mouse_probability = config.get('randomization_mouse_probability', mouse_probability)
+
+            reloadable_keys = [
+                'activity_interval',
+                'pattern_randomization_enabled',
+                'randomization_mouse_probability',
+                'inactivity_detection_enabled',
+                'inactivity_threshold_seconds',
+                'sound_enabled',
+                'sound_on_heartbeat',
+                'sound_frequency',
+                'sound_duration',
+                'schedule_enabled',
+                'work_hours_start',
+                'work_hours_end',
+                'work_days',
+                'schedule_warning_minutes',
+                'schedule_warning_sound',
+            ]
+            for key in reloadable_keys:
+                if old_config.get(key) != config.get(key):
+                    verbose_log(f"Config updated: {key} = {old_config.get(key)} -> {config.get(key)}")
+
+            non_reloadable_keys = ['total_duration', 'method', 'keyboard_key', 'mouse_move_distance']
+            for key in non_reloadable_keys:
+                if old_config.get(key) != config.get(key):
+                    verbose_log(
+                        f"Config changed (requires restart): {key} = {old_config.get(key)} -> {config.get(key)}"
+                    )
+
+            verbose_log("Note: total_duration, method, keyboard_key, mouse_move_distance require restart")
+            console_log("Configuration reloaded successfully!")
+        else:
+            console_log(f"Config reload failed: {message}")
+
+        CONFIG_RELOAD_REQUESTED = False
 
     # Enable Stay Awake Mode
     prevent_sleep()
@@ -556,6 +754,8 @@ def keep_active(activity_interval: int, total_duration: int, method: str, keyboa
             if idle_time < inactivity_threshold:
                  PAUSED = True
                  AUTO_PAUSED = True
+                 if TRAY_ENABLED:
+                     update_tray_icon('paused')
                  console_log("User activity detected, automatically pausing...")
                  verbose_log(f"Auto-pausing on start: idle_time={idle_time:.2f}s < threshold={inactivity_threshold}s")
 
@@ -585,6 +785,8 @@ def keep_active(activity_interval: int, total_duration: int, method: str, keyboa
 
                 console_log("Outside scheduled hours. Stopping.")
                 return False, total_jiggles
+
+            process_config_reload()
 
             # Check for schedule warning
             should_warn, warning_shown = check_schedule_warning(config, warning_shown)
@@ -617,12 +819,20 @@ def keep_active(activity_interval: int, total_duration: int, method: str, keyboa
                 key = ord(msvcrt.getch())
                 if key in EXIT_KEYS:
                     return False, total_jiggles
+                if key in [67, 99]:  # C or c
+                    CONFIG_RELOAD_REQUESTED = True
+                    console_log("Config reload requested...")
+                    verbose_log("Config reload requested via keypress")
                 if key in [80, 112]:  # P or p
                     PAUSED = True
+                    if TRAY_ENABLED:
+                        update_tray_icon('paused')
                     verbose_log("Program PAUSED")
                 elif key in [82, 114]:  # R or r
                     PAUSED = False
                     AUTO_PAUSED = False  # Reset auto-pause on manual resume
+                    if TRAY_ENABLED:
+                        update_tray_icon('running')
                     verbose_log("Program RESUMED")
 
             # Randomize current interval jitter (±10%)
@@ -635,8 +845,13 @@ def keep_active(activity_interval: int, total_duration: int, method: str, keyboa
             if not wait_for_next_activity(next_activity_time, end_time, config):
                 return False, total_jiggles
 
+            if CONFIG_RELOAD_REQUESTED:
+                process_config_reload()
+                continue
+
             # While paused, update dashboard more frequently
             while PAUSED and time.time() < end_time:
+                process_config_reload()
                 # Check for inactivity auto-resume
                 check_inactivity = DETECT_INACTIVITY or config.get('inactivity_detection_enabled', False)
                 if check_inactivity and AUTO_PAUSED:
@@ -646,6 +861,8 @@ def keep_active(activity_interval: int, total_duration: int, method: str, keyboa
                     if idle_time >= inactivity_threshold:
                         PAUSED = False
                         AUTO_PAUSED = False
+                        if TRAY_ENABLED:
+                            update_tray_icon('running')
                         console_log("User inactivity detected, automatically resuming...")
                         verbose_log(f"Auto-resuming: idle_time={idle_time:.2f}s >= threshold={inactivity_threshold}s")
                         break
@@ -688,13 +905,21 @@ def keep_active(activity_interval: int, total_duration: int, method: str, keyboa
                     key = ord(msvcrt.getch())
                     if key in EXIT_KEYS:
                         return False, total_jiggles
+                    elif key in [67, 99]:  # C or c
+                        CONFIG_RELOAD_REQUESTED = True
+                        console_log("Config reload requested...")
+                        verbose_log("Config reload requested via keypress")
                     elif key in [82, 114]:  # R or r
                         PAUSED = False
                         AUTO_PAUSED = False # Reset auto-pause
+                        if TRAY_ENABLED:
+                            update_tray_icon('running')
                         verbose_log("Program RESUMED")
                     elif key in [80, 112]:  # P or p
                         PAUSED = True
                         AUTO_PAUSED = False # Manual pause overrides auto-pause
+                        if TRAY_ENABLED:
+                            update_tray_icon('paused')
                         verbose_log("Program PAUSED")
 
                 time.sleep(0.5)
@@ -762,6 +987,89 @@ def display_exit_stats(start_time: float, total_jiggles: int) -> None:
         logger.info(f"Session ended - Runtime: {runtime_str}, Jiggles: {total_jiggles}")
 
 
+def create_tray_image(status: str = 'running') -> Image.Image:
+    """Create a tray icon image based on status."""
+    width = 64
+    height = 64
+    color = (0, 255, 0)  # Green for running
+    
+    if status == 'paused':
+        color = (255, 255, 0)  # Yellow for paused
+    elif status == 'waiting':
+        color = (0, 0, 255)  # Blue for waiting
+        
+    image = Image.new('RGBA', (width, height), (255, 255, 255, 0))
+    dc = ImageDraw.Draw(image)
+    dc.ellipse((8, 8, 56, 56), fill=color, outline=(0, 0, 0))
+    return image
+
+
+def tray_action_pause(icon, item) -> None:
+    """Handle Pause action from tray menu."""
+    global PAUSED
+    PAUSED = True
+    update_tray_icon('paused')
+    verbose_log("Paused via System Tray")
+    console_log("Paused via System Tray")
+
+
+def tray_action_resume(icon, item) -> None:
+    """Handle Resume action from tray menu."""
+    global PAUSED, AUTO_PAUSED
+    PAUSED = False
+    AUTO_PAUSED = False
+    update_tray_icon('running')
+    verbose_log("Resumed via System Tray")
+    console_log("Resumed via System Tray")
+
+
+def tray_action_exit(icon, item) -> None:
+    """Handle Exit action from tray menu."""
+    verbose_log("Exit requested via System Tray")
+    console_log("Exit requested via System Tray")
+    icon.stop()
+    # Trigger exit by simulating keyboard interrupt or just exit
+    os.kill(os.getpid(), signal.SIGINT)
+
+
+def create_tray_menu() -> Menu:
+    """Create the system tray menu."""
+    return Menu(
+        MenuItem(f"Activity Keeper v{VERSION}", None, enabled=False),
+        Menu.SEPARATOR,
+        MenuItem("Pause", tray_action_pause),
+        MenuItem("Resume", tray_action_resume),
+        Menu.SEPARATOR,
+        MenuItem("Exit", tray_action_exit)
+    )
+
+
+def setup_tray_icon() -> None:
+    """Setup and start the system tray icon in a separate thread."""
+    global tray_icon
+    
+    if not TRAY_AVAILABLE:
+        return
+
+    tray_icon = Icon(
+        "ActivityKeeper", 
+        create_tray_image('running'), 
+        menu=create_tray_menu(),
+        title=f"Activity Keeper v{VERSION}"
+    )
+    
+    # Run the icon loop in a separate daemon thread
+    threading.Thread(target=tray_icon.run, daemon=True).start()
+    verbose_log("System tray icon started")
+
+
+def update_tray_icon(status: str = 'running') -> None:
+    """Update the tray icon image based on current status."""
+    global tray_icon
+    if tray_icon and TRAY_AVAILABLE:
+        tray_icon.icon = create_tray_image(status)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Keep PC active and Teams green without mouse clicks")
     parser.add_argument('--config', type=str, default='activity_config.json', help='Configuration file')
@@ -772,14 +1080,18 @@ def main() -> None:
     parser.add_argument('--version', action='version', version=f'Teams Activity Keeper v{VERSION}')
     parser.add_argument('--log', type=str, default='activity_keeper.log', help='Path to log file (default: activity_keeper.log)')
     parser.add_argument('--profile', type=str, help='Profile name (e.g., work, home) - loads {profile}_config.json')
+    parser.add_argument('--preset', choices=['stealth', 'aggressive', 'testing', 'standard'], help='Load a built-in preset configuration')
+    parser.add_argument('--list-presets', action='store_true', help='List available preset configurations and exit')
+    parser.add_argument('--save-preset', type=str, metavar='NAME', help='Save current configuration as a preset')
     parser.add_argument('--quiet', action='store_true', help='Quiet mode - no dashboard, logs only')
     parser.add_argument('--dry-run', action='store_true', help='Run in dry-run mode (simulate activity without actually moving mouse/keyboard)')
     parser.add_argument('--auto-restart', action='store_true', help='Automatically wait and restart when schedule begins (instead of exiting)')
     parser.add_argument('--detect-inactivity', action='store_true', help='Automatically pause when user activity is detected')
     parser.add_argument('--random-pattern', action='store_true', help='Randomly vary activity method between mouse and keyboard for human-like behavior')
+    parser.add_argument('--tray', action='store_true', help='Run in system tray with icon and menu controls')
     args = parser.parse_args()
 
-    global VERBOSE, LOG_FILE, logger, PROFILE, QUIET, DRY_RUN, AUTO_RESTART, PAUSED, DETECT_INACTIVITY, AUTO_PAUSED, RANDOM_PATTERN
+    global VERBOSE, LOG_FILE, logger, PROFILE, QUIET, DRY_RUN, AUTO_RESTART, PAUSED, DETECT_INACTIVITY, AUTO_PAUSED, RANDOM_PATTERN, CONFIG_RELOAD_REQUESTED, current_config_file, TRAY_ENABLED, tray_icon
     VERBOSE = args.verbose
     LOG_FILE = args.log
     QUIET = args.quiet
@@ -788,6 +1100,15 @@ def main() -> None:
     DETECT_INACTIVITY = args.detect_inactivity
     RANDOM_PATTERN = args.random_pattern
     
+    if args.tray:
+        if TRAY_AVAILABLE:
+            TRAY_ENABLED = True
+            setup_tray_icon()
+        else:
+            print("Warning: System tray requested but pystray/Pillow not installed.")
+            print("To use system tray, install requirements: pip install pystray Pillow")
+            print("Continuing without system tray...")
+
     if QUIET:
         print("Quiet mode enabled - running in background")
     
@@ -796,6 +1117,13 @@ def main() -> None:
 
     if args.profile:
         PROFILE = args.profile
+
+    if args.list_presets:
+        print("\nAvailable Presets:")
+        descriptions = get_preset_descriptions()
+        for name, desc in descriptions.items():
+            print(f"  - {name.ljust(12)}: {desc}")
+        sys.exit(0)
 
     # Setup logging with custom path
     setup_logging(LOG_FILE)
@@ -811,21 +1139,31 @@ def main() -> None:
     else:
         console_log(f"Teams Activity Keeper v{VERSION} starting...")
 
-    # Determine config file based on profile
+    # Determine base config file
     if args.profile and args.config == 'activity_config.json':
-        # Profile specified and no explicit config file
         config_file = f"{args.profile}_config.json"
         if not os.path.exists(config_file):
             print(f"Warning: Profile config '{config_file}' not found, using default.")
             config_file = 'activity_config.json'
     else:
         config_file = args.config
-    
+
+    current_config_file = config_file
     if VERBOSE:
-        verbose_log(f"Using profile: {PROFILE}")
-        verbose_log(f"Loading config: {config_file}")
+        verbose_log(f"Config file: {current_config_file}")
     
     config = load_config(config_file)
+
+    # Apply preset if specified
+    if args.preset:
+        preset_config = load_preset(args.preset)
+        if preset_config:
+            verbose_log(f"Merging preset '{args.preset}' into configuration")
+            config.update(preset_config)
+            verbose_log("Preset configuration applied successfully")
+        else:
+            print(f"Error: Preset '{args.preset}' not found.")
+            sys.exit(1)
 
     # Validate configuration
     is_valid, error_msg = validate_config(config)
@@ -834,12 +1172,28 @@ def main() -> None:
         print("Please check your configuration file and try again.")
         sys.exit(1)
 
-    # Override config with command line args if provided
+    # Override config with command line args if provided (Highest Priority)
     activity_interval = args.interval or config.get('activity_interval', 120)
     total_duration = args.duration or config.get('total_duration', 18000)
     method = args.method or config.get('method', 'mouse')
     keyboard_key = config.get('keyboard_key', 'scrolllock')
     mouse_distance = config.get('mouse_move_distance', 10)
+
+    # Update actual config dict with these for potential saving
+    config['activity_interval'] = activity_interval
+    config['total_duration'] = total_duration
+    config['method'] = method
+
+    if args.save_preset:
+        preset_file = f"{args.save_preset}_preset.json"
+        try:
+            with open(preset_file, 'w') as f:
+                json.dump(config, f, indent=4)
+            console_log(f"Configuration saved successfully as preset: {preset_file}")
+            sys.exit(0)
+        except Exception as e:
+            print(f"Error saving preset: {e}")
+            sys.exit(1)
 
     if VERBOSE:
         print(f"Configuration: interval={activity_interval}s, duration={total_duration}s, method={method}")
@@ -856,6 +1210,16 @@ def main() -> None:
 
     try:
         while True:
+            # Allow some settings to affect new sessions (e.g., after --auto-restart)
+            try:
+                activity_interval = int(config.get('activity_interval', activity_interval))
+            except (TypeError, ValueError):
+                pass
+            try:
+                total_duration = int(config.get('total_duration', total_duration))
+            except (TypeError, ValueError):
+                pass
+
             if config.get('schedule_enabled', False) and not is_within_schedule(config):
                 if not AUTO_RESTART:
                     print("Outside scheduled hours. Exiting.")
@@ -871,7 +1235,35 @@ def main() -> None:
                     f"Outside work hours, waiting for next schedule (resumes at {next_start.strftime('%H:%M on %A')})"
                 )
 
+                if TRAY_ENABLED:
+                    update_tray_icon('waiting')
+
                 while config.get('schedule_enabled', False) and not is_within_schedule(config):
+                    if CONFIG_RELOAD_REQUESTED:
+                        success, message = reload_config()
+                        if success and _RELOADED_CONFIG is not None:
+                            old_config = dict(config)
+                            config.clear()
+                            config.update(_RELOADED_CONFIG)
+                            try:
+                                activity_interval = int(config.get('activity_interval', activity_interval))
+                            except (TypeError, ValueError):
+                                pass
+                            try:
+                                total_duration = int(config.get('total_duration', total_duration))
+                            except (TypeError, ValueError):
+                                pass
+                            if VERBOSE:
+                                for key in ['schedule_enabled', 'work_hours_start', 'work_hours_end', 'work_days']:
+                                    if old_config.get(key) != config.get(key):
+                                        verbose_log(
+                                            f"Config updated (waiting): {key} = {old_config.get(key)} -> {config.get(key)}"
+                                        )
+                            console_log("Configuration reloaded successfully!")
+                        else:
+                            console_log(f"Config reload failed: {message}")
+                        CONFIG_RELOAD_REQUESTED = False
+
                     next_start = get_next_schedule_start(config)
                     if not QUIET:
                         draw_dashboard(
@@ -890,13 +1282,49 @@ def main() -> None:
                             key = ord(msvcrt.getch())
                             if key in EXIT_KEYS:
                                 return
+                            if key in [67, 99]:  # C or c
+                                CONFIG_RELOAD_REQUESTED = True
+                                console_log("Config reload requested...")
+                                verbose_log("Config reload requested via keypress (waiting)")
                             if key in [80, 112]:  # P or p
                                 PAUSED = True
+                                if TRAY_ENABLED:
+                                    update_tray_icon('paused')
                                 verbose_log("Program PAUSED")
                             elif key in [82, 114]:  # R or r
                                 PAUSED = False
                                 AUTO_PAUSED = False  # Reset auto-pause on manual resume
+                                if TRAY_ENABLED:
+                                    # If still waiting, should technically be 'waiting', but if user resumes manually maybe they want 'running'? 
+                                    # But we are in the waiting loop. Let's keep it consistent with waiting loop.
+                                    # Actually if paused, icon is yellow. If resumed but waiting, icon should be blue.
+                                    update_tray_icon('waiting')
                                 verbose_log("Program RESUMED")
+
+                        if CONFIG_RELOAD_REQUESTED:
+                            success, message = reload_config()
+                            if success and _RELOADED_CONFIG is not None:
+                                old_config = dict(config)
+                                config.clear()
+                                config.update(_RELOADED_CONFIG)
+                                try:
+                                    activity_interval = int(config.get('activity_interval', activity_interval))
+                                except (TypeError, ValueError):
+                                    pass
+                                try:
+                                    total_duration = int(config.get('total_duration', total_duration))
+                                except (TypeError, ValueError):
+                                    pass
+                                if VERBOSE:
+                                    for key in ['schedule_enabled', 'work_hours_start', 'work_hours_end', 'work_days']:
+                                        if old_config.get(key) != config.get(key):
+                                            verbose_log(
+                                                f"Config updated (waiting): {key} = {old_config.get(key)} -> {config.get(key)}"
+                                            )
+                                console_log("Configuration reloaded successfully!")
+                            else:
+                                console_log(f"Config reload failed: {message}")
+                            CONFIG_RELOAD_REQUESTED = False
 
                         if is_within_schedule(config):
                             break
@@ -904,6 +1332,8 @@ def main() -> None:
 
                 logger.info("Schedule started, resuming activity")
                 console_log("Schedule started, resuming activity")
+                if TRAY_ENABLED:
+                    update_tray_icon('running')
                 continue
 
             should_wait_for_schedule, session_jiggles = keep_active(
@@ -921,6 +1351,8 @@ def main() -> None:
 
             break
     finally:
+        if TRAY_ENABLED and tray_icon:
+            tray_icon.stop()
         display_exit_stats(program_start_time, program_total_jiggles)
         print("\nActivity keeper finished.")
 
