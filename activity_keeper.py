@@ -33,11 +33,29 @@ ES_CONTINUOUS = 0x80000000
 ES_SYSTEM_REQUIRED = 0x00000001
 ES_DISPLAY_REQUIRED = 0x00000002
 
+class LASTINPUTINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint),
+                ("dwTime", ctypes.c_uint)]
+
+def get_idle_time_seconds() -> float:
+    """Returns the number of seconds since the last user input."""
+    lastInputInfo = LASTINPUTINFO()
+    lastInputInfo.cbSize = ctypes.sizeof(LASTINPUTINFO)
+    
+    if ctypes.windll.user32.GetLastInputInfo(ctypes.byref(lastInputInfo)):
+        millis = ctypes.windll.kernel32.GetTickCount() - lastInputInfo.dwTime
+        return millis / 1000.0
+    else:
+        return 0.0
+
 EXIT_KEYS = [27, 81, 113]  # ESC, Q, q
 JITTER_PERCENTAGE = 0.1
 DASHBOARD_WIDTH = 48
 VERBOSE = False  # Global verbose flag
 PAUSED = False  # Global pause state
+DETECT_INACTIVITY = False # Global inactivity detection flag
+AUTO_PAUSED = False # Global auto-paused state
+RANDOM_PATTERN = False  # Global random pattern flag
 QUIET = False  # Quiet/headless mode flag
 DRY_RUN = False  # Dry-run mode flag (simulate activity)
 AUTO_RESTART = False  # Auto-restart on schedule flag
@@ -152,7 +170,12 @@ def load_config(config_file: str = 'activity_config.json') -> dict:
             "sound_enabled": False,
             "sound_on_heartbeat": False,
             "sound_frequency": 1000,
-            "sound_duration": 200
+            "sound_duration": 200,
+            "inactivity_detection_enabled": False,
+            "inactivity_threshold_seconds": 60,
+            "inactivity_check_interval": 10,
+            "pattern_randomization_enabled": False,
+            "randomization_mouse_probability": 0.7
         }
     
     verbose_log(f"Loaded configuration from {config_file}")
@@ -192,6 +215,19 @@ def validate_config(config: dict) -> Tuple[bool, str]:
         if not work_days or not all(1 <= day <= 7 for day in work_days):
             return False, "Error: work_days must be list of numbers 1-7 (1=Monday, 7=Sunday)"
     
+    # Check inactivity settings
+    if config.get('inactivity_threshold_seconds', 60) <= 0:
+        return False, "Error: inactivity_threshold_seconds must be positive"
+    
+    if config.get('inactivity_check_interval', 10) <= 0:
+        return False, "Error: inactivity_check_interval must be positive"
+
+    # Check pattern randomization settings
+    if config.get('pattern_randomization_enabled', False):
+        prob = config.get('randomization_mouse_probability', 0.7)
+        if not (0.0 <= prob <= 1.0):
+            return False, "Error: randomization_mouse_probability must be between 0.0 and 1.0"
+
     return True, ""
 
 
@@ -295,8 +331,18 @@ def check_schedule_warning(config: dict, warning_shown: bool) -> Tuple[bool, boo
 
     return False, warning_shown
 
-def perform_activity(method: str, keyboard_key: str = "scrolllock", mouse_distance: int = 10) -> Tuple[int, int]:
+def perform_activity(method: str, keyboard_key: str = "scrolllock", mouse_distance: int = 10, pattern_randomization_enabled: bool = False, mouse_probability: float = 0.7) -> Tuple[int, int]:
     """Perform activity to keep system awake with randomization."""
+    
+    # Handle pattern randomization
+    if RANDOM_PATTERN or pattern_randomization_enabled:
+        original_method = method
+        if random.random() < mouse_probability:
+            method = "mouse"
+        else:
+            method = "keyboard"
+        verbose_log(f"Random pattern: selected {method} method (original: {original_method})")
+
     verbose_log(f"Performing activity: method={method}")
     dx, dy = 0, 0
 
@@ -370,6 +416,11 @@ def draw_dashboard(status: str, interval: int, total_jiggles: int, start_time: f
     print(f"|{f'  METHOD:    {method}'.ljust(width)}|")
     if PROFILE != "default":
         print(f"|{f'  PROFILE:   {PROFILE}'.ljust(width)}|")
+    if DETECT_INACTIVITY:
+        inactivity_status = "ENABLED"
+        if AUTO_PAUSED:
+            inactivity_status += " (AUTO-PAUSED)"
+        print(f"|{f'  INACTIVITY:{inactivity_status}'.ljust(width)}|")
     if waiting_until is not None:
         resumes_at = waiting_until.strftime("%A %H:%M")
         seconds_left = max(0, int(waiting_until.timestamp() - time.time()))
@@ -390,13 +441,39 @@ def draw_dashboard(status: str, interval: int, total_jiggles: int, start_time: f
         print("  No activities yet...")
 
 
-def wait_for_next_activity(next_activity_time: float, end_time: float) -> bool:
+def wait_for_next_activity(next_activity_time: float, end_time: float, config: dict = None) -> bool:
     """Wait until next activity time. Returns False if user wants to exit."""
-    global PAUSED
-    if PAUSED:
+    global PAUSED, AUTO_PAUSED
+    if PAUSED and not AUTO_PAUSED:
         return True
+        
+    # Check for inactivity detection logic
+    check_inactivity = DETECT_INACTIVITY or (config and config.get('inactivity_detection_enabled', False))
+    inactivity_threshold = config.get('inactivity_threshold_seconds', 60) if config else 60
+
     last_printed_second = -1
     while time.time() < next_activity_time:
+        # Check for inactivity
+        if check_inactivity:
+            idle_time = get_idle_time_seconds()
+            
+            # Auto-pause if user is active
+            if idle_time < inactivity_threshold:
+                if not PAUSED:
+                    PAUSED = True
+                    AUTO_PAUSED = True
+                    console_log("User activity detected, automatically pausing...")
+                    verbose_log(f"Auto-pausing: idle_time={idle_time:.2f}s < threshold={inactivity_threshold}s")
+                    return True # Return to main loop to handle pause state
+            
+            # Auto-resume if user is inactive and was auto-paused
+            elif PAUSED and AUTO_PAUSED:
+                if idle_time >= inactivity_threshold:
+                    PAUSED = False
+                    AUTO_PAUSED = False
+                    console_log("User inactivity detected, automatically resuming...")
+                    verbose_log(f"Auto-resuming: idle_time={idle_time:.2f}s >= threshold={inactivity_threshold}s")
+
         # Check for exit/pause/resume keys
         if msvcrt.kbhit():
             key = ord(msvcrt.getch())
@@ -405,10 +482,12 @@ def wait_for_next_activity(next_activity_time: float, end_time: float) -> bool:
                 return False
             if key in [80, 112]:  # P or p
                 PAUSED = True
+                AUTO_PAUSED = False # Manual pause overrides auto-pause
                 verbose_log("Program PAUSED")
                 return True
             if key in [82, 114]:  # R or r
                 PAUSED = False
+                AUTO_PAUSED = False
                 verbose_log("Program RESUMED")
 
         # Calculate remaining time
@@ -419,6 +498,8 @@ def wait_for_next_activity(next_activity_time: float, end_time: float) -> bool:
             if not QUIET:
                 display_sec = max(0, remaining_seconds)
                 sys.stdout.write(f"\r>>> NEXT HEARTBEAT IN: {display_sec}s   ")
+                if VERBOSE and check_inactivity:
+                     sys.stdout.write(f"(Idle: {get_idle_time_seconds():.1f}s)   ")
                 sys.stdout.flush()
             last_printed_second = remaining_seconds
 
@@ -438,6 +519,7 @@ def handle_pause_resume() -> None:
             verbose_log("Program PAUSED")
         elif key in [82, 114]:  # R or r
             PAUSED = False
+            AUTO_PAUSED = False  # Reset auto-pause on manual resume
             verbose_log("Program RESUMED")
 
 
@@ -446,13 +528,17 @@ def keep_active(activity_interval: int, total_duration: int, method: str, keyboa
 
     Returns (should_wait_for_schedule, session_jiggles).
     """
-    global PAUSED
+    global PAUSED, AUTO_PAUSED
     start_time = time.time()
     end_time = start_time + total_duration
     total_jiggles = 0
     activity_history = []  # Store last 5 activities
     warning_shown = False
     should_wait_for_schedule = False
+
+    # Extract randomization settings
+    pattern_randomization_enabled = config.get('pattern_randomization_enabled', False)
+    mouse_probability = config.get('randomization_mouse_probability', 0.7)
 
     # Enable Stay Awake Mode
     prevent_sleep()
@@ -462,19 +548,31 @@ def keep_active(activity_interval: int, total_duration: int, method: str, keyboa
         verbose_log("Played startup sound")
 
     try:
-        # Initial activity
-        dx, dy = perform_activity(method, keyboard_key, mouse_distance)
-        total_jiggles += 1
+        # Check for initial inactivity pause
+        check_inactivity = DETECT_INACTIVITY or config.get('inactivity_detection_enabled', False)
+        if check_inactivity:
+            idle_time = get_idle_time_seconds()
+            inactivity_threshold = config.get('inactivity_threshold_seconds', 60)
+            if idle_time < inactivity_threshold:
+                 PAUSED = True
+                 AUTO_PAUSED = True
+                 console_log("User activity detected, automatically pausing...")
+                 verbose_log(f"Auto-pausing on start: idle_time={idle_time:.2f}s < threshold={inactivity_threshold}s")
 
-        # Sound notification
-        if config.get('sound_enabled', False) and config.get('sound_on_heartbeat', False):
-            play_sound(config.get('sound_frequency', 1000), config.get('sound_duration', 200))
+        # Initial activity (only if not paused)
+        if not PAUSED:
+            dx, dy = perform_activity(method, keyboard_key, mouse_distance, pattern_randomization_enabled, mouse_probability)
+            total_jiggles += 1
 
-        # Add to history (keep last 5)
-        timestamp = time.strftime("%H:%M:%S")
-        activity_history.append(f"[{timestamp}] Heartbeat sent! (Moved {dx}, {dy})")
-        if len(activity_history) > 5:
-            activity_history.pop(0)
+            # Sound notification
+            if config.get('sound_enabled', False) and config.get('sound_on_heartbeat', False):
+                play_sound(config.get('sound_frequency', 1000), config.get('sound_duration', 200))
+
+            # Add to history (keep last 5)
+            timestamp = time.strftime("%H:%M:%S")
+            activity_history.append(f"[{timestamp}] Heartbeat sent! (Moved {dx}, {dy})")
+            if len(activity_history) > 5:
+                activity_history.pop(0)
 
         while time.time() < end_time:
             # Check if still within schedule
@@ -524,6 +622,7 @@ def keep_active(activity_interval: int, total_duration: int, method: str, keyboa
                     verbose_log("Program PAUSED")
                 elif key in [82, 114]:  # R or r
                     PAUSED = False
+                    AUTO_PAUSED = False  # Reset auto-pause on manual resume
                     verbose_log("Program RESUMED")
 
             # Randomize current interval jitter (±10%)
@@ -533,11 +632,24 @@ def keep_active(activity_interval: int, total_duration: int, method: str, keyboa
 
             next_activity_time = time.time() + current_wait
 
-            if not wait_for_next_activity(next_activity_time, end_time):
+            if not wait_for_next_activity(next_activity_time, end_time, config):
                 return False, total_jiggles
 
             # While paused, update dashboard more frequently
             while PAUSED and time.time() < end_time:
+                # Check for inactivity auto-resume
+                check_inactivity = DETECT_INACTIVITY or config.get('inactivity_detection_enabled', False)
+                if check_inactivity and AUTO_PAUSED:
+                    idle_time = get_idle_time_seconds()
+                    inactivity_threshold = config.get('inactivity_threshold_seconds', 60)
+                    
+                    if idle_time >= inactivity_threshold:
+                        PAUSED = False
+                        AUTO_PAUSED = False
+                        console_log("User inactivity detected, automatically resuming...")
+                        verbose_log(f"Auto-resuming: idle_time={idle_time:.2f}s >= threshold={inactivity_threshold}s")
+                        break
+                
                 if not is_within_schedule(config):
                     if AUTO_RESTART and config.get('schedule_enabled', False):
                         console_log("Outside scheduled hours. Entering waiting mode.")
@@ -578,15 +690,17 @@ def keep_active(activity_interval: int, total_duration: int, method: str, keyboa
                         return False, total_jiggles
                     elif key in [82, 114]:  # R or r
                         PAUSED = False
+                        AUTO_PAUSED = False # Reset auto-pause
                         verbose_log("Program RESUMED")
                     elif key in [80, 112]:  # P or p
                         PAUSED = True
+                        AUTO_PAUSED = False # Manual pause overrides auto-pause
                         verbose_log("Program PAUSED")
 
                 time.sleep(0.5)
 
             if time.time() < end_time and not PAUSED:
-                dx, dy = perform_activity(method, keyboard_key, mouse_distance)
+                dx, dy = perform_activity(method, keyboard_key, mouse_distance, pattern_randomization_enabled, mouse_probability)
                 total_jiggles += 1
 
                 # Sound notification
@@ -661,14 +775,18 @@ def main() -> None:
     parser.add_argument('--quiet', action='store_true', help='Quiet mode - no dashboard, logs only')
     parser.add_argument('--dry-run', action='store_true', help='Run in dry-run mode (simulate activity without actually moving mouse/keyboard)')
     parser.add_argument('--auto-restart', action='store_true', help='Automatically wait and restart when schedule begins (instead of exiting)')
+    parser.add_argument('--detect-inactivity', action='store_true', help='Automatically pause when user activity is detected')
+    parser.add_argument('--random-pattern', action='store_true', help='Randomly vary activity method between mouse and keyboard for human-like behavior')
     args = parser.parse_args()
 
-    global VERBOSE, LOG_FILE, logger, PROFILE, QUIET, DRY_RUN, AUTO_RESTART, PAUSED
+    global VERBOSE, LOG_FILE, logger, PROFILE, QUIET, DRY_RUN, AUTO_RESTART, PAUSED, DETECT_INACTIVITY, AUTO_PAUSED, RANDOM_PATTERN
     VERBOSE = args.verbose
     LOG_FILE = args.log
     QUIET = args.quiet
     DRY_RUN = args.dry_run
     AUTO_RESTART = args.auto_restart
+    DETECT_INACTIVITY = args.detect_inactivity
+    RANDOM_PATTERN = args.random_pattern
     
     if QUIET:
         print("Quiet mode enabled - running in background")
@@ -777,6 +895,7 @@ def main() -> None:
                                 verbose_log("Program PAUSED")
                             elif key in [82, 114]:  # R or r
                                 PAUSED = False
+                                AUTO_PAUSED = False  # Reset auto-pause on manual resume
                                 verbose_log("Program RESUMED")
 
                         if is_within_schedule(config):

@@ -11,6 +11,8 @@ Keep your PC active and Microsoft Teams status green without manual intervention
 **Features:**
 - 🖱️ Mouse jiggling with randomized movements
 - ⌨️ Keyboard activity simulation
+- 🎲 Activity pattern randomization (randomly vary mouse/keyboard for human-like behavior)
+- 👁️ Inactivity detection (auto-pause when user is active)
 - 🕐 Customizable activity intervals with randomization
 - 📅 Smart scheduling (work hours and days)
 - 🔄 Auto-restart mode (waits for schedule and resumes automatically)
@@ -97,6 +99,8 @@ python activity_keeper.py --interval 120 --duration 18000 --method mouse
 - `--quiet` - Run in quiet mode (no dashboard, logs only)
 - `--dry-run` - Simulate activity without actually moving mouse/keyboard
 - `--auto-restart` - Automatically wait and restart when schedule begins (instead of exiting)
+- `--detect-inactivity` - Automatically pause when user activity is detected
+- `--random-pattern` - Randomly vary activity method between mouse and keyboard
 
 **Interactive controls:**
 - Press **ESC** or **Q** to stop the program
@@ -146,6 +150,91 @@ python activity_keeper.py --auto-restart --quiet
 
 **Note:** Without `--auto-restart`, the script will exit when outside scheduled hours (default behavior).
 
+### Inactivity Detection
+
+Automatically pause the script when you're actively using your computer, and resume when you step away. This prevents interference with your work and makes the behavior more natural.
+
+**Enable inactivity detection:**
+```bash
+python activity_keeper.py --detect-inactivity
+```
+
+**How it works:**
+- Uses Windows API (`GetLastInputInfo`) to detect keyboard/mouse activity
+- If idle time is less than threshold (default: 60 seconds), script **auto-pauses**
+- When idle time exceeds threshold, script **auto-resumes**
+- Smart logic distinguishes between manual pause ('P' key) and automatic pause
+- Manual pause/resume always takes precedence over auto-pause
+
+**Configuration:**
+```json
+{
+    "inactivity_detection_enabled": true,
+    "inactivity_threshold_seconds": 60,
+    "inactivity_check_interval": 10
+}
+```
+
+- `inactivity_threshold_seconds` - How long user must be idle before resuming (default: 60)
+- `inactivity_check_interval` - How often to check for activity (default: 10 seconds)
+
+**Use Cases:**
+- Avoid interfering when you're actively working
+- Create more natural activity patterns
+- Automatically adapt to your presence
+- Combine with `--random-pattern` for maximum authenticity
+
+**Example:**
+```bash
+# Auto-pause when active, with pattern randomization
+python activity_keeper.py --detect-inactivity --random-pattern
+```
+
+### Pattern Randomization
+
+Randomly vary between mouse and keyboard activity to create more human-like and unpredictable behavior.
+
+**Enable pattern randomization:**
+```bash
+python activity_keeper.py --random-pattern
+```
+
+**How it works:**
+- Randomly selects mouse or keyboard activity for each heartbeat
+- Configurable probability (default: 70% mouse, 30% keyboard)
+- Overrides the `--method` argument
+- Logs which method was selected in verbose mode
+
+**Configuration:**
+```json
+{
+    "pattern_randomization_enabled": true,
+    "randomization_mouse_probability": 0.7
+}
+```
+
+- `randomization_mouse_probability` - Probability of mouse (0.0 to 1.0, default: 0.7)
+  - `0.7` = 70% mouse, 30% keyboard
+  - `0.5` = 50/50 split
+  - `0.9` = 90% mouse, 10% keyboard
+
+**Use Cases:**
+- Avoid predictable patterns
+- More human-like behavior
+- Harder to detect automation
+- Vary activity type without manual intervention
+
+**Example:**
+```bash
+# Equal probability of mouse and keyboard
+# Set in config: "randomization_mouse_probability": 0.5
+python activity_keeper.py --random-pattern --verbose
+
+# Output will show:
+# [VERBOSE] Random pattern: selected keyboard method (original: mouse)
+# [VERBOSE] Random pattern: selected mouse method (original: mouse)
+```
+
 ### Mouse Automation
 
 ```bash
@@ -177,7 +266,12 @@ python mouse_automation.py --config config.json
     "sound_enabled": false,
     "sound_on_heartbeat": false,
     "sound_frequency": 1000,
-    "sound_duration": 200
+    "sound_duration": 200,
+    "inactivity_detection_enabled": false,
+    "inactivity_threshold_seconds": 60,
+    "inactivity_check_interval": 10,
+    "pattern_randomization_enabled": false,
+    "randomization_mouse_probability": 0.7
 }
 ```
 
@@ -203,6 +297,15 @@ python mouse_automation.py --config config.json
 - `sound_on_heartbeat` - Play sound on each activity heartbeat
 - `sound_frequency` - Sound frequency in Hz (default: 1000)
 - `sound_duration` - Sound duration in milliseconds (default: 200)
+
+**Inactivity Detection Settings:**
+- `inactivity_detection_enabled` - Enable automatic pause when user is active
+- `inactivity_threshold_seconds` - Seconds of idle time before auto-resume (default: 60)
+- `inactivity_check_interval` - Seconds between idle time checks (default: 10)
+
+**Pattern Randomization Settings:**
+- `pattern_randomization_enabled` - Enable random variation between mouse/keyboard
+- `randomization_mouse_probability` - Probability of mouse activity 0.0-1.0 (default: 0.7)
 
 ### Mouse Automation (`config.json`)
 
@@ -394,6 +497,8 @@ Activity logs are saved to `activity_keeper.log` with timestamps and details of 
 6. **Multiple Scenarios**: Create different profiles (work, home, test) with separate configs
 7. **Debugging**: Enable `--verbose` to see detailed logs of all operations
 8. **Sound Alerts**: Enable schedule warnings to get notified before work hours end
+9. **Maximum Stealth**: Combine `--detect-inactivity --random-pattern` for most human-like behavior
+10. **No Interference**: Use `--detect-inactivity` to automatically pause when you're actively working
 
 ## Troubleshooting
 
