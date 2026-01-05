@@ -13,6 +13,8 @@ Keep your PC active and Microsoft Teams status green without manual intervention
 - ⌨️ Keyboard activity simulation
 - 🕐 Customizable activity intervals with randomization
 - 📅 Smart scheduling (work hours and days)
+- 🔄 Auto-restart mode (waits for schedule and resumes automatically)
+- 🧪 Dry-run mode (simulate activity without actual input)
 - 🎯 Stay Awake mode (prevents Windows sleep)
 - 📊 Real-time dashboard with activity history (last 5 heartbeats)
 - 📈 Exit statistics (runtime, total jiggles, average interval)
@@ -22,6 +24,11 @@ Keep your PC active and Microsoft Teams status green without manual intervention
 - ⚙️ Config validation with helpful error messages
 - 📝 Custom log file path support
 - 🏷️ Version display
+- 🎵 Sound notifications (startup, heartbeat, exit, warnings)
+- ⏰ Countdown warnings before schedule ends
+- 🤫 Quiet/headless mode for background operation
+- 👤 Multiple profile support
+- ⏸️ Pause/Resume functionality
 
 ### 2. Mouse Automation (`mouse_automation.py`)
 
@@ -86,11 +93,58 @@ python activity_keeper.py --interval 120 --duration 18000 --method mouse
 - `--verbose` - Enable verbose output with detailed debugging information
 - `--version` - Display version and exit
 - `--log` - Custom log file path (default: `activity_keeper.log`)
+- `--profile` - Load profile-specific config (e.g., `work` loads `work_config.json`)
+- `--quiet` - Run in quiet mode (no dashboard, logs only)
+- `--dry-run` - Simulate activity without actually moving mouse/keyboard
+- `--auto-restart` - Automatically wait and restart when schedule begins (instead of exiting)
 
 **Interactive controls:**
 - Press **ESC** or **Q** to stop the program
+- Press **P** to pause the program
+- Press **R** to resume the program
 - Dashboard updates in real-time
 - Countdown shows time until next activity
+
+### Dry-Run Mode
+
+Use the `--dry-run` flag to simulate activity without actually performing any mouse movements or key presses.
+
+**Use Cases:**
+- **Testing Configurations:** Verify your schedule and interval settings without triggering actual inputs.
+- **Previewing Behavior:** Watch the dashboard to see when activities would occur.
+- **Debugging:** Troubleshoot issues without affecting your system state.
+
+In dry-run mode, the dashboard will show `[DRY-RUN]` in the status line, and all actions will be logged to the console/log file as simulations.
+
+**Example:**
+```bash
+python activity_keeper.py --dry-run --verbose --duration 60
+```
+
+### Auto-Restart Mode
+
+Use the `--auto-restart` flag to keep the script running even when outside work hours. It will automatically resume when the schedule begins.
+
+**Use Cases:**
+- **Set-and-Forget Operation:** Run overnight or over weekends without manual restart.
+- **Automatic Across Schedule Boundaries:** Perfect for flexible work schedules.
+- **Background Mode:** Combine with `--quiet` for fully automated operation.
+
+When waiting for schedule, the dashboard shows:
+- **Status:** `WAITING`
+- **Resume Time:** "RESUMES: Monday 09:00"
+- **Countdown:** "STARTS IN: 15:23:45"
+
+**Example:**
+```bash
+# Run continuously, waiting for work hours
+python activity_keeper.py --auto-restart --schedule
+
+# Combine with quiet mode for background operation
+python activity_keeper.py --auto-restart --quiet
+```
+
+**Note:** Without `--auto-restart`, the script will exit when outside scheduled hours (default behavior).
 
 ### Mouse Automation
 
@@ -117,20 +171,38 @@ python mouse_automation.py --config config.json
     "schedule_enabled": false,
     "work_hours_start": "09:00",
     "work_hours_end": "17:00",
-    "work_days": [1, 2, 3, 4, 5]
+    "work_days": [1, 2, 3, 4, 5],
+    "schedule_warning_minutes": 5,
+    "schedule_warning_sound": true,
+    "sound_enabled": false,
+    "sound_on_heartbeat": false,
+    "sound_frequency": 1000,
+    "sound_duration": 200
 }
 ```
 
 **Configuration options:**
+
+**Basic Settings:**
 - `activity_interval` - Seconds between activities (randomized ±10%)
 - `total_duration` - How long to run (in seconds)
 - `method` - `"mouse"` or `"keyboard"`
 - `keyboard_key` - Key to press for keyboard method
 - `mouse_move_distance` - Max pixels to move mouse
+
+**Schedule Settings:**
 - `schedule_enabled` - Enable work schedule restrictions
-- `work_hours_start` - Start time (24-hour format)
-- `work_hours_end` - End time (24-hour format)
+- `work_hours_start` - Start time (24-hour format, e.g., "09:00")
+- `work_hours_end` - End time (24-hour format, e.g., "17:00")
 - `work_days` - Days to run (1=Monday, 7=Sunday)
+- `schedule_warning_minutes` - Minutes before schedule ends to show warning (default: 5)
+- `schedule_warning_sound` - Play sound when schedule ending warning appears
+
+**Sound Settings:**
+- `sound_enabled` - Enable all sound notifications
+- `sound_on_heartbeat` - Play sound on each activity heartbeat
+- `sound_frequency` - Sound frequency in Hz (default: 1000)
+- `sound_duration` - Sound duration in milliseconds (default: 200)
 
 ### Mouse Automation (`config.json`)
 
@@ -173,14 +245,69 @@ The Activity Keeper includes smart scheduling to only run during configured work
 ```
 
 **Behavior:**
-- Program won't start if outside scheduled hours
-- Automatically stops when schedule ends
-- Shows schedule information on exit
+- Without `--auto-restart`: Program won't start if outside scheduled hours, exits when schedule ends
+- With `--auto-restart`: Program waits for schedule to begin, automatically resumes when schedule starts
+- Automatically stops when schedule ends (or re-enters waiting mode with auto-restart)
+- Shows schedule information and warnings
+- Countdown warnings can alert you X minutes before schedule ends
+
+## Advanced Features
+
+### Multiple Profiles
+
+Use the `--profile` flag to switch between different configurations for different scenarios.
+
+**Example:**
+```bash
+# Create work_config.json for work hours
+python activity_keeper.py --profile work
+
+# Create home_config.json for personal use
+python activity_keeper.py --profile home
+```
+
+The script will load `{profile}_config.json`. If not found, it falls back to `activity_config.json`.
+
+### Pause/Resume
+
+Press **P** to pause activity at any time. The dashboard will show "PAUSED" status.
+Press **R** to resume. This works even in waiting mode.
+
+### Sound Notifications
+
+Enable sound notifications in your config:
+```json
+{
+    "sound_enabled": true,
+    "sound_on_heartbeat": false,
+    "sound_frequency": 1000,
+    "sound_duration": 200
+}
+```
+
+Sounds play on:
+- Startup
+- Each heartbeat (if `sound_on_heartbeat` is true)
+- Exit
+- Schedule ending warnings (double beep)
+
+### Quiet Mode
+
+Use `--quiet` to run in headless mode with no dashboard output:
+```bash
+python activity_keeper.py --quiet --auto-restart
+```
+
+Perfect for:
+- Running as a background process
+- Minimizing console distractions
+- Logging-only operation
 
 ## Features Breakdown
 
 ### Activity Keeper Dashboard
 
+**Running Mode:**
 ```
 +------------------------------------------------+
 |          TEAMS ACTIVITY KEEPER v2.3.0          |
@@ -191,7 +318,7 @@ The Activity Keeper includes smart scheduling to only run during configured work
 |  JIGGLES:   5                                  |
 |  METHOD:    mouse                              |
 +------------------------------------------------+
-|     Press ESC or Q in this window to STOP      |
+|     Press ESC/Q=STOP | P=PAUSE | R=RESUME      |
 +------------------------------------------------+
 
 Recent Activity:
@@ -201,6 +328,26 @@ Recent Activity:
 [16:46:25] Heartbeat sent! (Moved -6, -3)
 [16:48:30] Heartbeat sent! (Moved 2, 8)
 >>> NEXT HEARTBEAT IN: 115s
+```
+
+**Waiting Mode (with --auto-restart):**
+```
++------------------------------------------------+
+|          TEAMS ACTIVITY KEEPER v2.3.0          |
++------------------------------------------------+
+|  STATUS:    WAITING [DRY-RUN]                  |
+|  UPTIME:    00:05:30                           |
+|  INTERVAL:  120 s (Randomized)                 |
+|  JIGGLES:   0                                  |
+|  METHOD:    mouse                              |
+|  RESUMES:   Monday 09:00                       |
+|  STARTS IN: 03:24:30                           |
++------------------------------------------------+
+|     Press ESC/Q=STOP | P=PAUSE | R=RESUME      |
++------------------------------------------------+
+
+Recent Activity:
+  No activities yet...
 ```
 
 ### Exit Statistics
@@ -241,8 +388,12 @@ Activity logs are saved to `activity_keeper.log` with timestamps and details of 
 
 1. **For Teams**: Use mouse method with default settings
 2. **Prevent detection**: Enable schedule to match actual work hours
-3. **Testing**: Use `--duration 60 --interval 10` for quick tests
+3. **Testing**: Use `--dry-run --duration 60 --interval 10` for quick tests without actual activity
 4. **Backup**: The batch file runs from virtual environment automatically
+5. **Overnight Operation**: Use `--auto-restart --quiet` to run continuously in background
+6. **Multiple Scenarios**: Create different profiles (work, home, test) with separate configs
+7. **Debugging**: Enable `--verbose` to see detailed logs of all operations
+8. **Sound Alerts**: Enable schedule warnings to get notified before work hours end
 
 ## Troubleshooting
 

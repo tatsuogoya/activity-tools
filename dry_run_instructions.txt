@@ -1,0 +1,42 @@
+FEATURE: Dry-run Mode for activity_keeper.py
+
+Add a dry-run mode that simulates activity without actually moving the mouse or pressing keys. This is useful for testing configuration, schedules, and behavior.
+
+IMPLEMENTATION REQUIREMENTS:
+
+1. Add command-line argument:
+   - Add '--dry-run' argument to argparse
+   - Help text: "Run in dry-run mode (simulate activity without actually moving mouse/keyboard)"
+   - Store as boolean
+
+2. Add global variable:
+   - Add 'DRY_RUN = False' near the top with other globals (VERBOSE, PAUSED, QUIET, etc.)
+   - Set it from args.dry_run in main()
+
+3. Modify perform_activity() function:
+   - At the start of the function, check if DRY_RUN is True
+   - If DRY_RUN is True:
+     * Skip all actual pyautogui calls (pyautogui.press(), pyautogui.moveTo(), etc.)
+     * Instead, log what WOULD have been done using verbose_log()
+     * Example: verbose_log("DRY-RUN: Would have pressed Shift key")
+     * Example: verbose_log(f"DRY-RUN: Would have moved mouse to ({x}, {y})")
+   - Still perform all the sleep/wait operations so timing is realistic
+   - Still count the activity in total_jiggles
+
+4. Update dashboard display:
+   - In draw_dashboard(), add "[DRY-RUN]" indicator next to the status if DRY_RUN is True
+   - Example: "Status: RUNNING [DRY-RUN]" or "Status: PAUSED [DRY-RUN]"
+
+5. Update README.md:
+   - Add '--dry-run' to the command-line arguments section
+   - Add a new section explaining dry-run mode use cases:
+     * Testing configurations without triggering actual activity
+     * Previewing schedule behavior
+     * Debugging without side effects
+
+IMPORTANT:
+- Preserve all existing functionality
+- Dry-run mode should work with all other features (verbose, quiet, profiles, etc.)
+- The script should behave exactly the same except no actual mouse/keyboard activity occurs
+- All logging, statistics, and dashboard updates should still work normally
+

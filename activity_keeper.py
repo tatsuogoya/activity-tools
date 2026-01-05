@@ -9,7 +9,13 @@ import logging
 import msvcrt
 import ctypes
 from typing import Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta
+
+try:
+    import winsound
+    SOUND_AVAILABLE = True
+except ImportError:
+    SOUND_AVAILABLE = False
 
 try:
     import pyautogui as pag
@@ -31,6 +37,11 @@ EXIT_KEYS = [27, 81, 113]  # ESC, Q, q
 JITTER_PERCENTAGE = 0.1
 DASHBOARD_WIDTH = 48
 VERBOSE = False  # Global verbose flag
+PAUSED = False  # Global pause state
+QUIET = False  # Quiet/headless mode flag
+DRY_RUN = False  # Dry-run mode flag (simulate activity)
+AUTO_RESTART = False  # Auto-restart on schedule flag
+PROFILE = "default"  # Current profile name
 VERSION = "2.3.0"
 LOG_FILE = "activity_keeper.log"
 logger = None  # Will be initialized in main()
@@ -52,9 +63,10 @@ def setup_logging(log_file: str = 'activity_keeper.log') -> None:
 
 def console_log(message: str) -> None:
     """Print message to console with timestamp."""
-    timestamp = time.strftime("%H:%M:%S")
-    sys.stdout.write(f"[{timestamp}] {message}\n")
-    sys.stdout.flush()
+    if not QUIET:
+        timestamp = time.strftime("%H:%M:%S")
+        sys.stdout.write(f"[{timestamp}] {message}\n")
+        sys.stdout.flush()
 
 
 def verbose_log(message: str) -> None:
@@ -62,6 +74,15 @@ def verbose_log(message: str) -> None:
     if VERBOSE:
         timestamp = time.strftime("%H:%M:%S")
         print(f"[VERBOSE {timestamp}] {message}")
+
+
+def play_sound(frequency: int = 1000, duration: int = 200) -> None:
+    """Play a beep sound if sound is enabled and available."""
+    if SOUND_AVAILABLE:
+        try:
+            winsound.Beep(frequency, duration)
+        except Exception as e:
+            verbose_log(f"Could not play sound: {e}")
 
 
 def update_title(text: str) -> None:
@@ -125,7 +146,13 @@ def load_config(config_file: str = 'activity_config.json') -> dict:
             "schedule_enabled": False,
             "work_hours_start": "09:00",
             "work_hours_end": "17:00",
-            "work_days": [1, 2, 3, 4, 5]
+            "work_days": [1, 2, 3, 4, 5],
+            "schedule_warning_minutes": 5,
+            "schedule_warning_sound": True,
+            "sound_enabled": False,
+            "sound_on_heartbeat": False,
+            "sound_frequency": 1000,
+            "sound_duration": 200
         }
     
     verbose_log(f"Loaded configuration from {config_file}")
@@ -149,6 +176,10 @@ def validate_config(config: dict) -> Tuple[bool, str]:
     
     # Check schedule time format if enabled
     if config.get('schedule_enabled', False):
+        warning_minutes = config.get('schedule_warning_minutes', 5)
+        if not isinstance(warning_minutes, (int, float)) or warning_minutes < 0:
+            return False, "Error: schedule_warning_minutes must be >= 0 (e.g., 5)"
+
         try:
             from datetime import datetime
             datetime.strptime(config.get('work_hours_start', '09:00'), '%H:%M')
@@ -193,14 +224,88 @@ def is_within_schedule(config: dict) -> bool:
     
     return start_time <= current_time <= end_time
 
+
+def get_next_schedule_start(config: dict) -> datetime:
+    """Get the next datetime when the schedule will start."""
+    now = datetime.now()
+
+    if not config.get('schedule_enabled', False):
+        return now
+
+    if is_within_schedule(config):
+        return now
+
+    work_days = config.get('work_days', [1, 2, 3, 4, 5])
+    start_time = datetime.strptime(config.get('work_hours_start', '09:00'), '%H:%M').time()
+
+    if now.isoweekday() in work_days:
+        today_start = datetime.combine(now.date(), start_time)
+        if now < today_start:
+            return today_start
+
+    for day_offset in range(1, 8):
+        candidate = now + timedelta(days=day_offset)
+        if candidate.isoweekday() in work_days:
+            return datetime.combine(candidate.date(), start_time)
+
+    return now
+
+
+def _get_schedule_end_timestamp(config: dict) -> Optional[float]:
+    """Get today's schedule end time as a Unix timestamp, or None if not applicable."""
+    if not config.get('schedule_enabled', False):
+        return None
+
+    now = datetime.now()
+    if now.isoweekday() not in config.get('work_days', [1, 2, 3, 4, 5]):
+        return None
+
+    try:
+        end_time = datetime.strptime(config.get('work_hours_end', '17:00'), '%H:%M').time()
+    except ValueError:
+        return None
+
+    end_dt = datetime.combine(now.date(), end_time)
+    return end_dt.timestamp()
+
+
+def check_schedule_warning(config: dict, warning_shown: bool) -> Tuple[bool, bool]:
+    """Check if schedule is ending soon and should trigger a one-time warning.
+
+    Returns (should_warn_now, new_warning_shown).
+    """
+    schedule_end_ts = _get_schedule_end_timestamp(config)
+    if schedule_end_ts is None:
+        return False, warning_shown
+
+    warning_minutes = config.get('schedule_warning_minutes', 5)
+    try:
+        warning_minutes = float(warning_minutes)
+    except (TypeError, ValueError):
+        warning_minutes = 5
+
+    if warning_minutes <= 0:
+        return False, warning_shown
+
+    seconds_remaining = schedule_end_ts - time.time()
+    minutes_remaining = seconds_remaining / 60.0
+
+    if 0 < minutes_remaining <= warning_minutes and not warning_shown:
+        return True, True
+
+    return False, warning_shown
+
 def perform_activity(method: str, keyboard_key: str = "scrolllock", mouse_distance: int = 10) -> Tuple[int, int]:
     """Perform activity to keep system awake with randomization."""
     verbose_log(f"Performing activity: method={method}")
     dx, dy = 0, 0
 
     if method == "keyboard":
-        pag.press(keyboard_key)
-        logger.info(f"Pressed {keyboard_key} key")
+        if DRY_RUN:
+            verbose_log(f"DRY-RUN: Would have pressed {keyboard_key} key")
+        else:
+            pag.press(keyboard_key)
+        logger.info(f"Pressed {keyboard_key} key (DRY-RUN: {DRY_RUN})")
     elif method == "mouse":
         # Randomize distance and direction
         dx = random.randint(-mouse_distance, mouse_distance)
@@ -210,23 +315,31 @@ def perform_activity(method: str, keyboard_key: str = "scrolllock", mouse_distan
         if dx == 0 and dy == 0:
             dx = 1
 
-        # Move randomly and back
-        pag.moveRel(dx, dy, duration=random.uniform(0.1, 0.3))
-        time.sleep(random.uniform(0.05, 0.15))
-        pag.moveRel(-dx, -dy, duration=random.uniform(0.1, 0.3))
+        if DRY_RUN:
+            verbose_log(f"DRY-RUN: Would have moved mouse ({dx}, {dy})")
+            # Simulate timing
+            time.sleep(random.uniform(0.1, 0.3))
+            time.sleep(random.uniform(0.05, 0.15))
+            time.sleep(random.uniform(0.1, 0.3))
+            verbose_log("DRY-RUN: Would have pressed F15 key")
+        else:
+            # Move randomly and back
+            pag.moveRel(dx, dy, duration=random.uniform(0.1, 0.3))
+            time.sleep(random.uniform(0.05, 0.15))
+            pag.moveRel(-dx, -dy, duration=random.uniform(0.1, 0.3))
 
-        # Press F15 (Ghost Key) to ensure activity registration
-        try:
-            pag.press('f15')
-        except Exception as e:
-            logger.warning(f"Could not press F15 key: {e}")
+            # Press F15 (Ghost Key) to ensure activity registration
+            try:
+                pag.press('f15')
+            except Exception as e:
+                logger.warning(f"Could not press F15 key: {e}")
 
-        logger.info(f"Jiggled mouse ({dx}, {dy}) + F15 Key")
+        logger.info(f"Jiggled mouse ({dx}, {dy}) + F15 Key (DRY-RUN: {DRY_RUN})")
 
     return dx, dy
 
 
-def draw_dashboard(status: str, interval: int, total_jiggles: int, start_time: float, method: str, activity_history: list) -> None:
+def draw_dashboard(status: str, interval: int, total_jiggles: int, start_time: float, method: str, activity_history: list, show_warning: bool = False, waiting_until: Optional[datetime] = None) -> None:
     """Draws a clean, persistent dashboard in the console."""
     uptime_sec = int(time.time() - start_time)
     hours, remainder = divmod(uptime_sec, 3600)
@@ -244,13 +357,30 @@ def draw_dashboard(status: str, interval: int, total_jiggles: int, start_time: f
     print("+------------------------------------------------+")
     print(f"|{f'TEAMS ACTIVITY KEEPER v{VERSION}'.center(width)}|")
     print("+------------------------------------------------+")
-    print(f"|{f'  STATUS:    {status}'.ljust(width)}|")
+    if PAUSED:
+        status_display = f"{status} (PAUSED)" if status == "WAITING" else "PAUSED"
+    else:
+        status_display = status
+    if DRY_RUN:
+        status_display += " [DRY-RUN]"
+    print(f"|{f'  STATUS:    {status_display}'.ljust(width)}|")
     print(f"|{f'  UPTIME:    {uptime_str}'.ljust(width)}|")
     print(f"|{f'  INTERVAL:  {interval} s (Randomized)'.ljust(width)}|")
     print(f"|{f'  JIGGLES:   {total_jiggles}'.ljust(width)}|")
     print(f"|{f'  METHOD:    {method}'.ljust(width)}|")
+    if PROFILE != "default":
+        print(f"|{f'  PROFILE:   {PROFILE}'.ljust(width)}|")
+    if waiting_until is not None:
+        resumes_at = waiting_until.strftime("%A %H:%M")
+        seconds_left = max(0, int(waiting_until.timestamp() - time.time()))
+        hours_left, remainder = divmod(seconds_left, 3600)
+        minutes_left, seconds_left = divmod(remainder, 60)
+        print(f"|{f'  RESUMES:   {resumes_at}'.ljust(width)}|")
+        print(f"|{f'  STARTS IN: {hours_left:02d}:{minutes_left:02d}:{seconds_left:02d}'.ljust(width)}|")
+    if show_warning:
+        print(f"|{f'  WARNING: Schedule ending soon!'.ljust(width)}|")
     print("+------------------------------------------------+")
-    print(f"|{'Press ESC or Q in this window to STOP'.center(width)}|")
+    print(f"|{'Press ESC/Q=STOP | P=PAUSE | R=RESUME'.center(width)}|")
     print("+------------------------------------------------+")
     print("\nRecent Activity:")
     if activity_history:
@@ -262,23 +392,34 @@ def draw_dashboard(status: str, interval: int, total_jiggles: int, start_time: f
 
 def wait_for_next_activity(next_activity_time: float, end_time: float) -> bool:
     """Wait until next activity time. Returns False if user wants to exit."""
+    global PAUSED
+    if PAUSED:
+        return True
     last_printed_second = -1
     while time.time() < next_activity_time:
-        # Check for exit key
+        # Check for exit/pause/resume keys
         if msvcrt.kbhit():
             key = ord(msvcrt.getch())
-            verbose_log(f"Exit key detected: {key}")
             if key in EXIT_KEYS:
+                verbose_log(f"Exit key detected: {key}")
                 return False
+            if key in [80, 112]:  # P or p
+                PAUSED = True
+                verbose_log("Program PAUSED")
+                return True
+            if key in [82, 114]:  # R or r
+                PAUSED = False
+                verbose_log("Program RESUMED")
 
         # Calculate remaining time
         now = time.time()
         remaining_seconds = int(next_activity_time - now)
 
         if remaining_seconds != last_printed_second:
-            display_sec = max(0, remaining_seconds)
-            sys.stdout.write(f"\r>>> NEXT HEARTBEAT IN: {display_sec}s   ")
-            sys.stdout.flush()
+            if not QUIET:
+                display_sec = max(0, remaining_seconds)
+                sys.stdout.write(f"\r>>> NEXT HEARTBEAT IN: {display_sec}s   ")
+                sys.stdout.flush()
             last_printed_second = remaining_seconds
 
         time.sleep(0.1)
@@ -287,20 +428,47 @@ def wait_for_next_activity(next_activity_time: float, end_time: float) -> bool:
     return True
 
 
-def keep_active(activity_interval: int, total_duration: int, method: str, keyboard_key: str, mouse_distance: int, config: dict) -> None:
-    """Main function to keep the system active."""
+def handle_pause_resume() -> None:
+    """Check for pause/resume keys and update state."""
+    global PAUSED
+    if msvcrt.kbhit():
+        key = ord(msvcrt.getch())
+        if key in [80, 112]:  # P or p
+            PAUSED = True
+            verbose_log("Program PAUSED")
+        elif key in [82, 114]:  # R or r
+            PAUSED = False
+            verbose_log("Program RESUMED")
+
+
+def keep_active(activity_interval: int, total_duration: int, method: str, keyboard_key: str, mouse_distance: int, config: dict) -> Tuple[bool, int]:
+    """Main function to keep the system active.
+
+    Returns (should_wait_for_schedule, session_jiggles).
+    """
+    global PAUSED
     start_time = time.time()
     end_time = start_time + total_duration
     total_jiggles = 0
     activity_history = []  # Store last 5 activities
+    warning_shown = False
+    should_wait_for_schedule = False
 
     # Enable Stay Awake Mode
     prevent_sleep()
+
+    if config.get('sound_enabled', False):
+        play_sound(config.get('sound_frequency', 1000), config.get('sound_duration', 200))
+        verbose_log("Played startup sound")
 
     try:
         # Initial activity
         dx, dy = perform_activity(method, keyboard_key, mouse_distance)
         total_jiggles += 1
+
+        # Sound notification
+        if config.get('sound_enabled', False) and config.get('sound_on_heartbeat', False):
+            play_sound(config.get('sound_frequency', 1000), config.get('sound_duration', 200))
 
         # Add to history (keep last 5)
         timestamp = time.strftime("%H:%M:%S")
@@ -311,15 +479,52 @@ def keep_active(activity_interval: int, total_duration: int, method: str, keyboa
         while time.time() < end_time:
             # Check if still within schedule
             if not is_within_schedule(config):
+                if AUTO_RESTART and config.get('schedule_enabled', False):
+                    console_log("Outside scheduled hours. Entering waiting mode.")
+                    logger.info("Outside work hours, returning to waiting mode")
+                    should_wait_for_schedule = True
+                    return True, total_jiggles
+
                 console_log("Outside scheduled hours. Stopping.")
-                return
+                return False, total_jiggles
+
+            # Check for schedule warning
+            should_warn, warning_shown = check_schedule_warning(config, warning_shown)
+            if should_warn:
+                warning_minutes = config.get('schedule_warning_minutes', 5)
+                console_log(
+                    f"WARNING: Schedule will end in less than {warning_minutes} minutes!"
+                )
+                logger.warning(
+                    f"Schedule ending soon (threshold: {warning_minutes} minutes)"
+                )
+                if config.get('schedule_warning_sound', True) and config.get('sound_enabled', False):
+                    play_sound(1500, 500)
+                    play_sound(1500, 500)
             
             # Draw UI
-            draw_dashboard("RUNNING", activity_interval, total_jiggles, start_time, method, activity_history)
+            if not QUIET:
+                draw_dashboard(
+                    "RUNNING",
+                    activity_interval,
+                    total_jiggles,
+                    start_time,
+                    method,
+                    activity_history,
+                    warning_shown,
+                )
 
-            # Clear any stray buffered key presses
+            # Handle buffered key presses (exit/pause/resume)
             while msvcrt.kbhit():
-                msvcrt.getch()
+                key = ord(msvcrt.getch())
+                if key in EXIT_KEYS:
+                    return False, total_jiggles
+                if key in [80, 112]:  # P or p
+                    PAUSED = True
+                    verbose_log("Program PAUSED")
+                elif key in [82, 114]:  # R or r
+                    PAUSED = False
+                    verbose_log("Program RESUMED")
 
             # Randomize current interval jitter (±10%)
             jitter = int(activity_interval * JITTER_PERCENTAGE)
@@ -329,11 +534,64 @@ def keep_active(activity_interval: int, total_duration: int, method: str, keyboa
             next_activity_time = time.time() + current_wait
 
             if not wait_for_next_activity(next_activity_time, end_time):
-                return
+                return False, total_jiggles
 
-            if time.time() < end_time:
+            # While paused, update dashboard more frequently
+            while PAUSED and time.time() < end_time:
+                if not is_within_schedule(config):
+                    if AUTO_RESTART and config.get('schedule_enabled', False):
+                        console_log("Outside scheduled hours. Entering waiting mode.")
+                        logger.info("Outside work hours, returning to waiting mode")
+                        should_wait_for_schedule = True
+                        return True, total_jiggles
+
+                    console_log("Outside scheduled hours. Stopping.")
+                    return False, total_jiggles
+
+                should_warn, warning_shown = check_schedule_warning(config, warning_shown)
+                if should_warn:
+                    warning_minutes = config.get('schedule_warning_minutes', 5)
+                    console_log(
+                        f"WARNING: Schedule will end in less than {warning_minutes} minutes!"
+                    )
+                    logger.warning(
+                        f"Schedule ending soon (threshold: {warning_minutes} minutes)"
+                    )
+                    if config.get('schedule_warning_sound', True) and config.get('sound_enabled', False):
+                        play_sound(1500, 500)
+                        play_sound(1500, 500)
+
+                if not QUIET:
+                    draw_dashboard(
+                        "RUNNING",
+                        activity_interval,
+                        total_jiggles,
+                        start_time,
+                        method,
+                        activity_history,
+                        warning_shown,
+                    )
+
+                if msvcrt.kbhit():
+                    key = ord(msvcrt.getch())
+                    if key in EXIT_KEYS:
+                        return False, total_jiggles
+                    elif key in [82, 114]:  # R or r
+                        PAUSED = False
+                        verbose_log("Program RESUMED")
+                    elif key in [80, 112]:  # P or p
+                        PAUSED = True
+                        verbose_log("Program PAUSED")
+
+                time.sleep(0.5)
+
+            if time.time() < end_time and not PAUSED:
                 dx, dy = perform_activity(method, keyboard_key, mouse_distance)
                 total_jiggles += 1
+
+                # Sound notification
+                if config.get('sound_enabled', False) and config.get('sound_on_heartbeat', False):
+                    play_sound(config.get('sound_frequency', 1000), config.get('sound_duration', 200))
 
                 # Add to history (keep last 5)
                 timestamp = time.strftime("%H:%M:%S")
@@ -341,21 +599,24 @@ def keep_active(activity_interval: int, total_duration: int, method: str, keyboa
                 if len(activity_history) > 5:
                     activity_history.pop(0)
 
+        return False, total_jiggles
+
     except KeyboardInterrupt:
         print("\nActivity keeper stopped by user")
+        return False, total_jiggles
     except Exception as e:
         logger.error(f"An error occurred: {e}")
         print(f"\nError: An unexpected error occurred")
         print(f"Details: {e}")
         print(f"Check {LOG_FILE} for more information.")
+        return False, total_jiggles
     finally:
         # Disable Stay Awake Mode so PC can sleep later
         allow_sleep()
 
-        # Display session statistics
-        display_exit_stats(start_time, total_jiggles)
-
-        print("\nActivity keeper finished.")
+        if config.get('sound_enabled', False) and not should_wait_for_schedule:
+            play_sound(800, 300)  # Lower frequency, longer duration for exit
+            verbose_log("Played exit sound")
 
 
 def display_exit_stats(start_time: float, total_jiggles: int) -> None:
@@ -396,11 +657,27 @@ def main() -> None:
     parser.add_argument('--verbose', action='store_true', help='Enable verbose output with detailed information')
     parser.add_argument('--version', action='version', version=f'Teams Activity Keeper v{VERSION}')
     parser.add_argument('--log', type=str, default='activity_keeper.log', help='Path to log file (default: activity_keeper.log)')
+    parser.add_argument('--profile', type=str, help='Profile name (e.g., work, home) - loads {profile}_config.json')
+    parser.add_argument('--quiet', action='store_true', help='Quiet mode - no dashboard, logs only')
+    parser.add_argument('--dry-run', action='store_true', help='Run in dry-run mode (simulate activity without actually moving mouse/keyboard)')
+    parser.add_argument('--auto-restart', action='store_true', help='Automatically wait and restart when schedule begins (instead of exiting)')
     args = parser.parse_args()
 
-    global VERBOSE, LOG_FILE, logger
+    global VERBOSE, LOG_FILE, logger, PROFILE, QUIET, DRY_RUN, AUTO_RESTART, PAUSED
     VERBOSE = args.verbose
     LOG_FILE = args.log
+    QUIET = args.quiet
+    DRY_RUN = args.dry_run
+    AUTO_RESTART = args.auto_restart
+    
+    if QUIET:
+        print("Quiet mode enabled - running in background")
+    
+    if DRY_RUN:
+        print("DRY-RUN mode enabled - simulating activity")
+
+    if args.profile:
+        PROFILE = args.profile
 
     # Setup logging with custom path
     setup_logging(LOG_FILE)
@@ -411,9 +688,26 @@ def main() -> None:
         print("Verbose mode enabled - showing detailed output")
         verbose_log(f"Logging to: {LOG_FILE}")
 
-    console_log(f"Teams Activity Keeper v{VERSION} starting...")
+    if PROFILE != "default":
+        console_log(f"Teams Activity Keeper v{VERSION} [{PROFILE} profile] starting...")
+    else:
+        console_log(f"Teams Activity Keeper v{VERSION} starting...")
 
-    config = load_config(args.config)
+    # Determine config file based on profile
+    if args.profile and args.config == 'activity_config.json':
+        # Profile specified and no explicit config file
+        config_file = f"{args.profile}_config.json"
+        if not os.path.exists(config_file):
+            print(f"Warning: Profile config '{config_file}' not found, using default.")
+            config_file = 'activity_config.json'
+    else:
+        config_file = args.config
+    
+    if VERBOSE:
+        verbose_log(f"Using profile: {PROFILE}")
+        verbose_log(f"Loading config: {config_file}")
+    
+    config = load_config(config_file)
 
     # Validate configuration
     is_valid, error_msg = validate_config(config)
@@ -432,13 +726,6 @@ def main() -> None:
     if VERBOSE:
         print(f"Configuration: interval={activity_interval}s, duration={total_duration}s, method={method}")
 
-    # Check if within scheduled hours
-    if not is_within_schedule(config):
-        print("Outside scheduled hours. Exiting.")
-        print(f"Schedule: {config.get('work_hours_start')} - {config.get('work_hours_end')}")
-        print(f"Work days: {config.get('work_days')}")
-        sys.exit(0)
-
     # Handle keyboard interrupt
     def signal_handler(sig: int, frame: object) -> None:
         logger.info("Script interrupted by user")
@@ -446,7 +733,77 @@ def main() -> None:
 
     signal.signal(signal.SIGINT, signal_handler)
 
-    keep_active(activity_interval, total_duration, method, keyboard_key, mouse_distance, config)
+    program_start_time = time.time()
+    program_total_jiggles = 0
+
+    try:
+        while True:
+            if config.get('schedule_enabled', False) and not is_within_schedule(config):
+                if not AUTO_RESTART:
+                    print("Outside scheduled hours. Exiting.")
+                    print(f"Schedule: {config.get('work_hours_start')} - {config.get('work_hours_end')}")
+                    print(f"Work days: {config.get('work_days')}")
+                    sys.exit(0)
+
+                next_start = get_next_schedule_start(config)
+                logger.info(
+                    f"Outside work hours, waiting for next schedule (resumes at {next_start.strftime('%H:%M')})"
+                )
+                console_log(
+                    f"Outside work hours, waiting for next schedule (resumes at {next_start.strftime('%H:%M on %A')})"
+                )
+
+                while config.get('schedule_enabled', False) and not is_within_schedule(config):
+                    next_start = get_next_schedule_start(config)
+                    if not QUIET:
+                        draw_dashboard(
+                            "WAITING",
+                            activity_interval,
+                            program_total_jiggles,
+                            program_start_time,
+                            method,
+                            [],
+                            show_warning=False,
+                            waiting_until=next_start,
+                        )
+
+                    for _ in range(60):
+                        if msvcrt.kbhit():
+                            key = ord(msvcrt.getch())
+                            if key in EXIT_KEYS:
+                                return
+                            if key in [80, 112]:  # P or p
+                                PAUSED = True
+                                verbose_log("Program PAUSED")
+                            elif key in [82, 114]:  # R or r
+                                PAUSED = False
+                                verbose_log("Program RESUMED")
+
+                        if is_within_schedule(config):
+                            break
+                        time.sleep(1)
+
+                logger.info("Schedule started, resuming activity")
+                console_log("Schedule started, resuming activity")
+                continue
+
+            should_wait_for_schedule, session_jiggles = keep_active(
+                activity_interval,
+                total_duration,
+                method,
+                keyboard_key,
+                mouse_distance,
+                config,
+            )
+            program_total_jiggles += session_jiggles
+
+            if should_wait_for_schedule and AUTO_RESTART:
+                continue
+
+            break
+    finally:
+        display_exit_stats(program_start_time, program_total_jiggles)
+        print("\nActivity keeper finished.")
 
 
 if __name__ == "__main__":

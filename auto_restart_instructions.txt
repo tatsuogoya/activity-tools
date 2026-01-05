@@ -1,0 +1,66 @@
+FEATURE: Auto-restart on Schedule for activity_keeper.py
+
+Add an auto-restart feature that keeps the script running even outside work hours, automatically resuming activity when the schedule begins again.
+
+IMPLEMENTATION REQUIREMENTS:
+
+1. Add command-line argument:
+   - Add '--auto-restart' argument to argparse
+   - Help text: "Automatically wait and restart when schedule begins (instead of exiting)"
+   - Store as boolean
+
+2. Add global variable:
+   - Add 'AUTO_RESTART = False' near the top with other globals
+   - Set it from args.auto_restart in main()
+
+3. Create helper function to calculate next schedule start:
+   - Function name: get_next_schedule_start()
+   - Returns: datetime object of when work hours will next begin
+   - Logic:
+     * If currently within schedule, return current time (already started)
+     * If before start time today and today is a work day, return today's start time
+     * Otherwise, find the next work day and return its start time
+     * Handle weekend -> Monday transition
+     * Use work_hours_start and work_days from config
+
+4. Modify main() function:
+   - When schedule check fails (outside work hours), check if AUTO_RESTART is True
+   - If AUTO_RESTART is True:
+     * Don't exit the program
+     * Calculate next schedule start using get_next_schedule_start()
+     * Enter a waiting loop that:
+       - Shows status in dashboard: "WAITING FOR SCHEDULE (Resumes at HH:MM on DAY)"
+       - Sleeps for 1 minute
+       - Rechecks if schedule has started
+       - Allows exit via Ctrl+C or 'Q'
+     * When schedule starts, continue with normal execution
+   - If AUTO_RESTART is False, maintain current behavior (exit when outside schedule)
+
+5. Modify keep_active() function:
+   - When activity loop detects we've left the schedule (during the loop):
+     * If AUTO_RESTART is True, break from activity loop and return to main() waiting state
+     * If AUTO_RESTART is False, maintain current behavior (exit)
+
+6. Update dashboard display:
+   - Add a new status state: "WAITING" for when outside schedule but auto-restart is enabled
+   - Show countdown or next start time in dashboard when waiting
+   - Example: "Status: WAITING (Resumes at 09:00 on Monday)"
+
+7. Logging:
+   - Log when entering waiting mode: "Outside work hours, waiting for next schedule (resumes at HH:MM)"
+   - Log when resuming from waiting mode: "Schedule started, resuming activity"
+
+8. Update README.md:
+   - Add '--auto-restart' to the command-line arguments section
+   - Add explanation of use cases:
+     * Running overnight/over weekend without manual restart
+     * Automatic operation across schedule boundaries
+     * Combining with quiet mode for background operation
+
+IMPORTANT:
+- Preserve all existing functionality
+- Must work with schedule_enabled=false (just run continuously)
+- Must respect pause/resume functionality even while waiting
+- Must allow clean exit via Ctrl+C or 'Q' even while waiting
+- Should work with all other features (verbose, quiet, profiles, etc.)
+
