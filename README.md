@@ -14,9 +14,14 @@ Keep your PC active and Microsoft Teams status green without manual intervention
 - 🕐 Customizable activity intervals with randomization
 - 📅 Smart scheduling (work hours and days)
 - 🎯 Stay Awake mode (prevents Windows sleep)
-- 📊 Real-time dashboard with statistics
+- 📊 Real-time dashboard with activity history (last 5 heartbeats)
+- 📈 Exit statistics (runtime, total jiggles, average interval)
+- 🔍 Verbose mode for debugging
 - 🔑 Ghost key (F15) for activity registration
 - 🛡️ Failsafe support (move mouse to corner to stop)
+- ⚙️ Config validation with helpful error messages
+- 📝 Custom log file path support
+- 🏷️ Version display
 
 ### 2. Mouse Automation (`mouse_automation.py`)
 
@@ -78,6 +83,9 @@ python activity_keeper.py --interval 120 --duration 18000 --method mouse
 - `--interval` - Activity interval in seconds (default: 120)
 - `--duration` - Total duration in seconds (default: 18000 = 5 hours)
 - `--method` - Activity method: `mouse` or `keyboard` (default: `mouse`)
+- `--verbose` - Enable verbose output with detailed debugging information
+- `--version` - Display version and exit
+- `--log` - Custom log file path (default: `activity_keeper.log`)
 
 **Interactive controls:**
 - Press **ESC** or **Q** to stop the program
@@ -175,20 +183,37 @@ The Activity Keeper includes smart scheduling to only run during configured work
 
 ```
 +------------------------------------------------+
-|           TEAMS ACTIVITY KEEPER v2.0           |
+|          TEAMS ACTIVITY KEEPER v2.3.0          |
 +------------------------------------------------+
 |  STATUS:    RUNNING                            |
 |  UPTIME:    00:02:45                           |
 |  INTERVAL:  120 s (Randomized)                 |
-|  JIGGLES:   3                                  |
+|  JIGGLES:   5                                  |
 |  METHOD:    mouse                              |
 +------------------------------------------------+
 |     Press ESC or Q in this window to STOP      |
 +------------------------------------------------+
 
 Recent Activity:
-[16:45:30] Heartbeat sent! (Moved -4, 7)
+[16:40:12] Heartbeat sent! (Moved 3, -5)
+[16:42:15] Heartbeat sent! (Moved -2, 7)
+[16:44:20] Heartbeat sent! (Moved 4, 1)
+[16:46:25] Heartbeat sent! (Moved -6, -3)
+[16:48:30] Heartbeat sent! (Moved 2, 8)
 >>> NEXT HEARTBEAT IN: 115s
+```
+
+### Exit Statistics
+
+When the program stops, it displays a summary:
+```
+==================================================
+SESSION STATISTICS
+==================================================
+Total Runtime:    02:15:30
+Total Jiggles:    68
+Average Interval: 120.3 seconds
+==================================================
 ```
 
 ### Code Quality
